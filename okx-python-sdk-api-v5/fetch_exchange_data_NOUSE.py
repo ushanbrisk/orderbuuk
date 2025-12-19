@@ -1,6 +1,7 @@
 import asyncio
 import base64
-import datetime
+# import datetime
+from datetime import datetime
 import hmac
 import json
 import time
@@ -8,10 +9,79 @@ import zlib
 
 import requests
 import websockets
+from data_queue import OrderBookData, global_orderbook_queue
+import asyncio
+
+
+class WebSocketDataProducer:
+    def __init__(self):
+        self.is_running = True
+
+    def parse_websocket_message_to_dataclass(self, message):
+        """将WebSocket消息解析为OrderBookData"""
+        try:
+            # 提取时间戳和JSON数据
+            timestamp_str, json_str = message.split('{', 1)
+            json_str = '{' + json_str
+            data = json.loads(json_str)
+
+            if 'data' not in data or not data['data']:
+                return None
+
+            orderbook_data = data['data'][0]
+
+            # 转换为OrderBookData
+            return OrderBookData(
+                timestamp=datetime.fromisoformat(timestamp_str.strip('Z').replace('T', ' ')),
+                bids=[(float(level[0]), float(level[1]), int(level[2]), int(level[3]))
+                      for level in orderbook_data.get('bids', [])],
+                asks=[(float(level[0]), float(level[1]), int(level[2]), int(level[3]))
+                      for level in orderbook_data.get('asks', [])],
+                symbol=data['arg']['instId'],
+                sequence_id=orderbook_data.get('seqId', 0),
+                action=data.get('action', 'update')
+            )
+        except Exception as e:
+            print(f"消息解析错误: {e}")
+            return None
+
+    async def start_producer(self, url, channels):
+        """启动WebSocket数据生产者"""
+        producer = WebSocketDataProducer()
+
+        while producer.is_running:
+            try:
+                async with websockets.connect(url) as ws:
+                    sub_param = {"op": "subscribe", "args": channels}
+                    await ws.send(json.dumps(sub_param))
+                    print("WebSocket生产者已启动2222...")
+
+                    while producer.is_running:
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=25)
+                            message = get_timestamp() + message
+                            print(message)
+                            # print(f"收到原始消息: {message[:100]}...")  # 只打印前100字符
+
+                            # 解析数据
+                            orderbook_data = self.parse_websocket_message_to_dataclass(message)
+                            if orderbook_data:
+                                # 放入全局队列
+                                await global_orderbook_queue.put(orderbook_data)
+                                print(
+                                    f"✓ 数据已放入队列 | 时间: {orderbook_data.timestamp.strftime('%H:%M:%S.%f')[:-3]}")
+
+                        except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                            await ws.send('ping')
+
+            except Exception as e:
+                print(f"WebSocket连接错误: {e}")
+                await asyncio.sleep(5)  # 重连前等待
+
 
 
 def get_timestamp():
-    now = datetime.datetime.now()
+    now = datetime.now()
     t = now.isoformat("T", "milliseconds")
     return t + "Z"
 
@@ -49,10 +119,6 @@ def partial(res):
     bids = data_obj['bids']
     asks = data_obj['asks']
     instrument_id = res['arg']['instId']
-    # print('全量数据bids为：' + str(bids))
-    # print('档数为：' + str(len(bids)))
-    # print('全量数据asks为：' + str(asks))
-    # print('档数为：' + str(len(asks)))
     return bids, asks, instrument_id
 
 
@@ -73,12 +139,12 @@ def update_bids(res, bids_p):
                     del j[1]
                     j.insert(1, i[1])
                     break
-        else:
-            if i[1] != "0":
-                bids_p.append(i)
-    else:
-        bids_p.sort(key=lambda price: sort_num(price[0]), reverse=True)
-        # print('合并后的bids为：' + str(bids_p) + '，档数为：' + str(len(bids_p)))
+            else:
+                if i[1] != "0":
+                    bids_p.append(i)
+
+    bids_p.sort(key=lambda price: sort_num(price[0]), reverse=True)
+    # print('合并后的bids为：' + str(bids_p) + '，档数为：' + str(len(bids_p)))
     return bids_p
 
 
@@ -171,6 +237,13 @@ def change(num_old):
     else:
         out = num_old
     return out
+
+#修改现有的 subscribe_without_login 函数
+async def subscribe_without_login2(url, channels):
+    """修改后的订阅函数，将数据放入队列"""
+    producer = WebSocketDataProducer()
+    await producer.start_producer(url, channels)
+
 
 
 # subscribe channels un_need login
@@ -345,7 +418,6 @@ async def trade(url, api_key, passphrase, secret_key, trade_param):
             print("连接断开，正在重连……")
             continue
 
-
 # unsubscribe channels
 async def unsubscribe(url, api_key, passphrase, secret_key, channels):
     async with websockets.connect(url) as ws:
@@ -367,7 +439,6 @@ async def unsubscribe(url, api_key, passphrase, secret_key, channels):
         res = await ws.recv()
         print(f"recv: {res}")
 
-
 # unsubscribe channels
 async def unsubscribe_without_login(url, channels):
     async with websockets.connect(url) as ws:
@@ -380,198 +451,13 @@ async def unsubscribe_without_login(url, channels):
         res = await ws.recv()
         print(f"recv: {res}")
 
-
-# api_key = ""
-# secret_key = ""
-# passphrase = ""
 api_key = "e85e1598-5cca-4212-97b2-dbda96200c93"
 secret_key = "5C44AE07D08C0A589037D29E10008467"
 passphrase = "Hans428571"
 
-
-# WebSocket公共频道 public channels
-# 实盘 real trading
 url = "wss://ws.okx.com:8443/ws/v5/public"
-# 模拟盘 demo trading
-# url = "wss://wspap.okx.com:8443/ws/v5/public?brokerId=9999"
 
-# WebSocket私有频道 private channels
-# 实盘 real trading
-# url = "wss://ws.okx.com:8443/ws/v5/private"
-# 模拟盘 demo trading
-# url = "wss://wspap.okx.com:8443/ws/v5/private"
-# 充值信息/提币信息频道、定投策略订单频道，价差撮合(实盘)
-# url = "wss://ws.okx.com:8443/ws/v5/business"
-# 充值信息/提币信息频道、提币信息频道、定投策略订单频道，价差撮合(模拟盘)
-# url = "wss://ws.okx.com:8443/ws/v5/business?brokerId=9999"
-
-'''
-公共频道 public channel
-:param channel: 频道名
-:param instType: 产品类型
-:param instId: 产品ID
-:param uly: 合约标的指数
-
-'''
-
-# 产品频道  Instruments Channel
-# channels = [{"channel": "instruments", "instType": "FUTURES"}]
-# 行情频道 tickers channel
-# channels = [{"channel": "tickers", "instId": "BTC-USDT"}, {"channel": "tickers", "instId": "ETH-USDT"}]
-# 持仓总量频道 Open interest Channel
-# channels = [{"channel": "open-interest", "instId": "BTC-USD-210326"}]
-# K线频道 Candlesticks Channel
-# channels = [{"channel": "candle1m", "instId": "BTC-USD-210326"}]
-# 交易频道 Trades Channel
-# channels = [{"channel": "trades", "instId": "BTC-USD-201225"}]
-# 预估交割/行权价格频道 Estimated delivery/exercise Price Channel
-# channels = [{"channel": "estimated-price", "instType": "FUTURES", "uly": "BTC-USD"}]
-# 标记价格频道 Mark Price Channel
-# channels = [{"channel": "mark-price", "instId": "BTC-USDT-210326"}]
-# 标记价格K线频道 Mark Price Candlesticks Channel
-# channels = [{"channel": "mark-price-candle1D", "instId": "BTC-USD-201225"}]
-# 限价频道 Price Limit Channel
-# channels = [{"channel": "price-limit", "instId": "BTC-USD-201225"}]
-# 深度频道 Order Book Channel
 channels = [{"channel": "books", "instId": "SOL-USDT"}]
-# 期权定价频道 OPTION Summary Channel
-# channels = [{"channel": "opt-summary", "uly": "BTC-USD"}]
-# 资金费率频道 Funding Rate Channel
-# channels = [{"channel": "funding-rate", "instId": "BTC-USD-SWAP"}]
-# 指数K线频道 Index Candlesticks Channel
-# channels = [{"channel": "index-candle1m", "instId": "BTC-USDT"}]
-# 指数行情频道 Index Tickers Channel
-# channels = [{"channel": "index-tickers", "instId": "BTC-USDT"}]
-# status频道 Status Channel
-# channels = [{"channel": "status"}]
-# 平台公共爆仓单频道
-# channels = [{"channel": "liquidation-orders", "instType":"SWAP"}]
-# 自动减仓预警频道
-# channels = [{"channel": "adl-warning", "instType":"SWAP","instFamily":""}]
-# 期权公共成交频道
-# channels = [{"channel": "option-trades", "instType":"OPTION","instFamily":"BTC-USD"}]
-# 公共大宗交易频道 Public block trading channel
-# channels = [{"channel": "public-struc-block-trades"}]
-# 大宗交易行情频道 Block trading market channel
-# channels = [{"channel": "block-tickers", "instId":"BTC-USDT-SWAP"}]
-# 公共大宗交易单腿交易频道
-# channels = [{"channel": "public-block-trades", "instId":"BTC-USDT-SWAP"}]
-# 全部交易频道
-# channels = [{"channel": "trades-all","instId":"BTC-USDT-SWAP"}]
-# 集合竞价信息频道
-# channels = [{"channel": "call-auction-details","instId":"BTC-USDT"}]
-
-
-# 价差撮合
-# 深度频道 sprd-bbo-tbt/sprd-books5
-# channels = [{"channel": "sprd-bbo-tbt","sprdId":""}]
-# 公共成交数据频道 sprd-public-trades （每次推送一条成交数据）
-# channels = [{"channel": "sprd-public-trades","sprdId":""}]
-# 行情频道 tickers
-# channels = [{"channel": "sprd-tickers","sprdId":""}]
-
-
-
-
-'''
-私有频道 private channel
-:param channel: 频道名
-:param ccy: 币种
-:param instType: 产品类型
-:param uly: 合约标的指数
-:param instId: 产品ID
-
-'''
-
-# 账户频道 Account Channel
-# channels = [{"channel": "account", "ccy": "BTC"}]
-# 持仓频道 Positions Channel
-# channels = [{"channel": "positions", "instType": "FUTURES", "uly": "BTC-USDT", "instId": "BTC-USDT-210326"}]
-# 余额和持仓频道 Balance and Position Channel
-# channels = [{"channel": "balance_and_position"}]
-# 订单频道 Order Channel
-# channels = [{"channel": "orders", "instType": "FUTURES", "uly": "BTC-USD", "instId": "BTC-USD-201225"}]
-# 策略委托订单频道 Algo Orders Channel
-# channels = [{"channel": "orders-algo", "instType": "FUTURES", "uly": "BTC-USD", "instId": "BTC-USD-201225"}]
-# 高级策略委托订单频道 Cancel Advance Algos
-# channels = [{"channel": "algo-advance", "instType": "SPOT","instId": "BTC-USD-201225","algoId":"12345678"}]
-# 爆仓风险预警推送频道
-# channels = [{"channel": "liquidation-warning", "instType": "SWAP","instType": "","uly":"","instId":""}]
-# 账户greeks频道
-# channels = [{"channel": "account-greeks", "ccy": "BTC"}]
-# 询价频道 Inquiry channel
-# channels = [{"channel": "rfqs"}]
-# 报价频道 Quote channel
-# channels = [{"channel": "quotes"}]
-# 大宗交易频道 Block trading channel
-# channels = [{"channel": "struc-block-trades"}]
-# 现货网格策略委托订单频道 Consignment order channel of spot grid strategy
-# channels = [{"channel": "grid-orders-spot", "instType": "ANY"}]
-# 合约网格策略委托订单频道 Spot grid policy delegated order channel contract grid policy delegated order channel
-# channels = [{"channel": "grid-orders-contract", "instType": "ANY"}]
-# 合约网格持仓频道 Contract grid position channel
-# channels = [{"channel": "grid-positions", "algoId": ""}]
-# 网格策略子订单频道 Grid policy suborder channel
-# channels = [{"channel": "grid-sub-orders", "algoId": ""}]
-# 充值信息频道
-# channels = [{"channel": "deposit-info", "ccy":"BTC"}]
-# 提币信息频道
-# channels = [{"channel": "withdrawal-info", "ccy":"BTC"}]
-# 定投策略委托订单频道
-# channels = [{"channel": "algo-recurring-buy", "instType":"SPOT"}]
-# 跟单消息通知频道
-# channels = [{"channel": "copytrading-notification", "instType":"SWAP","instId":"BTC-USDT-SWAP"}]
-# 带单消息通知频道
-# channels = [{"channel": "copytrading-lead-notification", "instType":"SWAP","instId":"BTC-USDT-SWAP"}]
-
-#价差撮合
-# 订单频道 sprd-orders
-# channels = [{"channel": "sprd-orders", "sprdId":""}]
-# 成交数据頻道 sprd-trades
-# channels = [{"channel": "sprd-trades", "sprdId":""}]
-
-
-
-
-'''
-交易 trade
-'''
-
-# 下单 Place Order
-# trade_param = {"id": "1512", "op": "order", "args": [{"side": "buy", "instId": "BTC-USDT", "tdMode": "isolated", "ordType": "limit", "px": "19777", "sz": "1"}]}
-# 批量下单 Place Multiple Orders
-# trade_param = {"id": "1512", "op": "batch-orders", "args": [
-#         {"side": "buy", "instId": "BTC-USDT", "tdMode": "isolated", "ordType": "limit", "px": "19666", "sz": "1"},
-#         {"side": "buy", "instId": "BTC-USDT", "tdMode": "isolated", "ordType": "limit", "px": "19633", "sz": "1"}
-#     ]}
-# 撤单 Cancel Order
-# trade_param = {"id": "1512", "op": "cancel-order", "args": [{"instId": "BTC-USDT", "ordId": "259424589042823169"}]}
-# 批量撤单 Cancel Multiple Orders
-# trade_param = {"id": "1512", "op": "batch-cancel-orders", "args": [
-#         {"instId": "BTC-USDT", "ordId": ""},
-#         {"instId": "BTC-USDT", "ordId": ""}
-#     ]}
-# 改单 Amend Order
-# trade_param = {"id": "1512", "op": "amend-order", "args": [{"instId": "BTC-USDT", "ordId": "259432767558135808", "newSz": "2"}]}
-# 批量改单 Amend Multiple Orders
-# trade_param = {"id": "1512", "op": "batch-amend-orders", "args": [
-#         {"instId": "BTC-USDT", "ordId": "", "newSz": "2"},
-#         {"instId": "BTC-USDT", "ordId": "", "newSz": "3"}
-#     ]}
-
-# 撤销 MMP 订单
-# trade_param = {"id":"","op":"mass-cancel","args":[{
-#     "instType":"",
-#     "instFamily":"",
-#。   "lockInterval":""
-# }]}
-
-# 价差撮合下单 sprd_order
-# trade_param = {"id": "1512", "op": "sprd-order", "args": [{"sprdId": "", "clOrdId": "", "tag": "", "side": "", "ordType": "", "sz": "1", "px":""}]}
-# 价差撮合撤单 sprd-cancel-order
-# trade_param = {"id": "1512", "op": "sprd-cancel-order", "args": [{"clOrdId": "", "ordId": ""}]}
-# 价差撮合全部撤单 sprd-mass-cancel
-# trade_param = {"id": "1512", "op": "sprd-mass-cancel", "args": [{"sprdId": "",}]}
 
 
 
@@ -580,12 +466,8 @@ channels = [{"channel": "books", "instId": "SOL-USDT"}]
 loop = asyncio.get_event_loop()
 
 # 公共频道 不需要登录（行情，持仓总量，K线，标记价格，深度，资金费率等）subscribe public channel
-loop.run_until_complete(subscribe_without_login(url, channels))
-
-# 私有频道 需要登录（账户，持仓，订单等）subscribe private channel
-# loop.run_until_complete(subscribe(url, api_key, passphrase, secret_key, channels))
-
-# 交易（下单，撤单，改单等）trade
-# loop.run_until_complete(trade(url, api_key, passphrase, secret_key, trade_param))
+loop.run_until_complete(subscribe_without_login2(url, channels))
 
 loop.close()
+
+
