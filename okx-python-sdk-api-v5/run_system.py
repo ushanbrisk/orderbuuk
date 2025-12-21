@@ -86,9 +86,9 @@ class RealTimeAnalysisSystem:
 
         # 创建客户端实例，但不会自动启动
         self.ws_client = OKXWebSocketClient(
-            api_key="e85e1598-5cca-4212-97b2-dbda96200c93",
-            secret_key="5C44AE07D08C0A589037D29E10008467",
-            passphrase="Hans428571",
+            api_key="",
+            secret_key="",
+            passphrase="",
             symbol=self.symbol
         )
         self.is_running = False
